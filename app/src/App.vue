@@ -3,16 +3,25 @@ import Chart from 'chart.js/auto'
 import type { ChartData } from 'chart.js'
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { read, utils } from 'xlsx'
-import { classifyEmotion, classifyEmotionBatch, type ClassifyEmotionResult } from '../gemini'
+import {
+  classifyEmotion,
+  classifyEmotionBatch,
+  type ClassifyEmotionResult,
+  MAX_BATCH_SIZE,
+} from '../gemini'
 
 type Mode = 'single' | 'excel'
 
+const MAX_EXCEL_SENTENCES = 10
+const EXCEL_BATCH_SIZE = MAX_BATCH_SIZE
 const NAV_ITEMS: Array<{ key: Mode; label: string; description: string }> = [
   { key: 'single', label: 'Single Sentence', description: 'Manual entry for one message at a time' },
-  { key: 'excel', label: 'Excel Upload', description: 'Upload up to 10 rows from a spreadsheet' },
+  {
+    key: 'excel',
+    label: 'Excel Upload',
+    description: `Upload up to ${MAX_EXCEL_SENTENCES} rows (processed ${EXCEL_BATCH_SIZE} at a time)`,
+  },
 ]
-
-const MAX_EXCEL_SENTENCES = 10
 const CHART_LABELS = ['joy', 'love', 'anger', 'fear', 'sadness', 'surprise', 'unknown'] as const
 type ChartLabel = (typeof CHART_LABELS)[number]
 const CHART_COLORS: Record<ChartLabel, string> = {
@@ -298,7 +307,9 @@ const handleExcelUpload = async (event: Event) => {
       </nav>
       <div class="mt-auto px-6 pb-8 pt-6 text-xs text-slate-500">
         <p>API: Gemini {{ activeMode === 'single' ? 'Sentence' : 'Excel' }} mode</p>
-        <p class="mt-1">Handles up to {{ MAX_EXCEL_SENTENCES }} sentences per upload.</p>
+        <p class="mt-1">
+          Handles up to {{ MAX_EXCEL_SENTENCES }} sentences per upload ({{ EXCEL_BATCH_SIZE }} analyzed per request).
+        </p>
       </div>
     </aside>
 
@@ -326,11 +337,11 @@ const handleExcelUpload = async (event: Event) => {
                 {{ activeMode === 'single' ? 'Quick single-sentence run' : 'Batch Excel run' }}
               </h3>
               <p class="mt-2 text-sm text-slate-500">
-                {{
-                  activeMode === 'single'
-                    ? 'Type or paste any sentence to predict its dominant emotion using Gemini.'
-                    : 'Upload .xlsx/.xls where each sentence lives in its own cell. Up to 10 sentences will be processed.'
-                }}
+  {{
+    activeMode === 'single'
+      ? 'Type or paste any sentence to predict its dominant emotion using Gemini.'
+      : `Upload .xlsx/.xls where each sentence lives in its own cell. Up to ${MAX_EXCEL_SENTENCES} sentences will be processed in batches of ${EXCEL_BATCH_SIZE}.`
+  }}
               </p>
 
               <div class="mt-6 space-y-4">
@@ -384,7 +395,9 @@ const handleExcelUpload = async (event: Event) => {
                     </svg>
                     <div>
                       <p class="font-semibold text-slate-900">Choose Excel file</p>
-                      <p class="text-xs text-slate-500">Supports .xlsx and .xls · up to 10 sentences</p>
+                      <p class="text-xs text-slate-500">
+                        Supports .xlsx and .xls · up to {{ MAX_EXCEL_SENTENCES }} sentences ({{ EXCEL_BATCH_SIZE }} per request)
+                      </p>
                     </div>
                   </label>
 

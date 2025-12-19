@@ -1,6 +1,6 @@
 """
 Batch-test the Gemini API against the Hugging Face `emotion` dataset using
-blocks of 10 samples per request. The model must answer with JSON so we can
+blocks of 4 samples per request. The model must answer with JSON so we can
 compare predictions with the dataset ground truth.
 
 Usage examples:
@@ -18,7 +18,8 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence
+from itertools import chain
+from typing import Any, Dict, Iterable, List, Sequence
 
 import google.generativeai as genai
 from datasets import load_dataset
@@ -26,13 +27,14 @@ from tqdm import tqdm
 
 
 LABELS: Sequence[str] = ["sadness", "joy", "love", "anger", "fear", "surprise"]
-BLOCK_SIZE = 10
+BLOCK_SIZE = 4
+TOKENS_PER_SENTENCE = 512
 DEFAULT_MODEL = "gemini-2.5-flash"
 GENERATION_CONFIG = {
     "temperature": 0,
     "top_p": 1,
     "top_k": 1,
-    "max_output_tokens": 512,
+    "max_output_tokens": BLOCK_SIZE * TOKENS_PER_SENTENCE,
     "response_mime_type": "application/json",
 }
 
@@ -68,8 +70,8 @@ class Sample:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Test Gemini on the emotion dataset using 10-sample blocks.")
-    parser.add_argument("--blocks", type=int, default=1, help="Number of 10-sample blocks to process.")
+    parser = argparse.ArgumentParser(description="Test Gemini on the emotion dataset using 4-sample blocks.")
+    parser.add_argument("--blocks", type=int, default=1, help="Number of 4-sample blocks to process.")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Gemini model to invoke.")
     parser.add_argument("--split", default="test", help="Dataset split to read (default: test).")
     parser.add_argument("--api-key", dest="api_key", default=None, help="Gemini API key (fallback to env vars).")
@@ -108,7 +110,7 @@ def build_block_prompt(block_id: int, samples: List[Sample]) -> str:
         '{\n'
         '  "block": <block_id>,\n'
         '  "results": [\n'
-        '    {"local_id": <1-10>, "dataset_index": <int>, "sentence": "<original text>", "predicted_emotion": "<label>"}\n'
+        f'    {{"local_id": <1-{BLOCK_SIZE}>, "dataset_index": <int>, "sentence": "<original text>", "predicted_emotion": "<label>"}}\n'
         "  ]\n"
         "}\n"
         "Do not omit any sentences and keep the sentence text verbatim."
@@ -134,6 +136,38 @@ def normalize_label(raw: str) -> str:
     if token in LABELS:
         return token
     return SYNONYMS.get(token, token)
+
+
+def trim_results_for_export(results: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Return only the fields that must be exposed externally."""
+    trimmed: List[Dict[str, str]] = []
+    for item in results:
+        trimmed.append(
+            {
+                "sentence": str(item.get("sentence", "")),
+                "gold_emotion": str(item.get("gold_emotion", "")),
+                "predicted_emotion": str(item.get("predicted_emotion", "")),
+            }
+        )
+    return trimmed
+
+
+def compute_accuracy_from_json(payload: str | Dict[str, Any]) -> float:
+    """Compute accuracy % from a summary JSON (string or dict)."""
+    data = json.loads(payload) if isinstance(payload, str) else payload
+    results = data.get("results", [])
+    if not isinstance(results, list):
+        raise ValueError("Expected 'results' to be a list in the provided JSON payload.")
+    total = len(results)
+    if not total:
+        return 0.0
+    matches = 0
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("gold_emotion") == entry.get("predicted_emotion"):
+            matches += 1
+    return round(100 * matches / total, 2)
 
 
 def parse_block_response(raw_text: str) -> Dict:
@@ -186,15 +220,19 @@ def evaluate_blocks(model: genai.GenerativeModel, block_iter: Iterable[List[Samp
 
     accuracy = 100 * correct / total if total else 0.0
     model_name = getattr(model, "model_name", DEFAULT_MODEL)
-    return {
+    trimmed_results = trim_results_for_export(detailed_results)
+    summary = {
         "model": model_name,
         "block_size": BLOCK_SIZE,
         "blocks_processed": processed,
         "total_sentences": total,
         "accuracy": round(accuracy, 2),
         "correct": correct,
-        "results": detailed_results,
+        "results": trimmed_results,
     }
+    # accuracy sanity-check derived from the exported JSON structure
+    summary["accuracy"] = compute_accuracy_from_json(summary)
+    return summary
 
 
 def main() -> None:
@@ -203,12 +241,14 @@ def main() -> None:
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(args.model, generation_config=GENERATION_CONFIG)
 
-    blocks = list(chunk_samples(args.split, args.blocks))
-    if not blocks:
+    block_iter = chunk_samples(args.split, args.blocks)
+    try:
+        first_block = next(block_iter)
+    except StopIteration:
         print("No samples found for the requested configuration.", file=sys.stderr)
         sys.exit(1)
 
-    summary = evaluate_blocks(model, tqdm(blocks, desc="Blocks", unit="block"))
+    summary = evaluate_blocks(model, tqdm(chain([first_block], block_iter), desc="Blocks", unit="block"))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

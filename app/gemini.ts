@@ -2,6 +2,8 @@ import { GoogleGenerativeAI, type GenerativeModel } from '@google/generative-ai'
 
 const MODEL_NAME = 'gemini-2.5-flash'
 const LABELS = ['sadness', 'joy', 'love', 'anger', 'fear', 'surprise'] as const
+export const MAX_BATCH_SIZE = 4
+const TOKENS_PER_SENTENCE = 256
 type EmotionLabel = (typeof LABELS)[number]
 
 const LABEL_SYNONYMS: Record<string, EmotionLabel> = {
@@ -32,7 +34,7 @@ const MODEL_CONFIG = {
   temperature: 0,
   topP: 1,
   topK: 1,
-  maxOutputTokens: 128,
+  maxOutputTokens: MAX_BATCH_SIZE * TOKENS_PER_SENTENCE,
   responseMimeType: 'application/json',
 } as const
 
@@ -182,14 +184,18 @@ export async function classifyEmotion(sentence: string): Promise<ClassifyEmotion
   }
 }
 
-export async function classifyEmotionBatch(sentences: string[]): Promise<ClassifyEmotionResult[]> {
-  const cleaned = sentences.map((s) => s.trim()).filter((s): s is string => Boolean(s))
-  if (!cleaned.length) {
-    throw new Error('At least one sentence is required.')
+function* chunkSentences(sentences: string[], maxSize: number): IterableIterator<string[]> {
+  for (let index = 0; index < sentences.length; index += maxSize) {
+    yield sentences.slice(index, index + maxSize)
   }
+}
 
-  const model = ensureModel()
-  const result = await model.generateContent(buildBatchPrompt(cleaned))
+async function classifyBatchChunk(
+  model: GenerativeModel,
+  sentences: string[],
+): Promise<ClassifyEmotionResult[]> {
+
+  const result = await model.generateContent(buildBatchPrompt(sentences))
   const response = await result.response
 
   const finishReason = response.candidates?.[0]?.finishReason ?? null
@@ -200,7 +206,7 @@ export async function classifyEmotionBatch(sentences: string[]): Promise<Classif
     throw new Error('Unable to parse batch response from Gemini.')
   }
 
-  return cleaned.map((sentence, index) => {
+  return sentences.map((sentence, index) => {
     const entry = parsed[index]
     let label = ''
     if (entry && typeof entry === 'object') {
@@ -217,4 +223,21 @@ export async function classifyEmotionBatch(sentences: string[]): Promise<Classif
       rawResponse: rawText,
     }
   })
+}
+
+export async function classifyEmotionBatch(sentences: string[]): Promise<ClassifyEmotionResult[]> {
+  const cleaned = sentences.map((s) => s.trim()).filter((s): s is string => Boolean(s))
+  if (!cleaned.length) {
+    throw new Error('At least one sentence is required.')
+  }
+
+  const model = ensureModel()
+  const aggregated: ClassifyEmotionResult[] = []
+
+  for (const chunk of chunkSentences(cleaned, MAX_BATCH_SIZE)) {
+    const chunkResults = await classifyBatchChunk(model, chunk)
+    aggregated.push(...chunkResults)
+  }
+
+  return aggregated
 }

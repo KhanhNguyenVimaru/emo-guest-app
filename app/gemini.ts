@@ -178,10 +178,13 @@ export async function classifyEmotion(sentence: string, apiKey: string): Promise
   }
 }
 
-function* chunkSentences(sentences: string[], maxSize: number): IterableIterator<string[]> {
-  for (let index = 0; index < sentences.length; index += maxSize) {
-    yield sentences.slice(index, index + maxSize)
+export function chunkIntoBlocks<T>(items: T[], blockSize: number = MAX_BATCH_SIZE): T[][] {
+  const size = Math.max(1, blockSize)
+  const blocks: T[][] = []
+  for (let index = 0; index < items.length; index += size) {
+    blocks.push(items.slice(index, index + size))
   }
+  return blocks
 }
 
 async function classifyBatchChunk(
@@ -231,7 +234,7 @@ export async function classifyEmotionBatch(
   const model = ensureModel(apiKey)
   const aggregated: ClassifyEmotionResult[] = []
 
-  for (const chunk of chunkSentences(cleaned, MAX_BATCH_SIZE)) {
+  for (const chunk of chunkIntoBlocks(cleaned, MAX_BATCH_SIZE)) {
     const chunkResults = await classifyBatchChunk(model, chunk)
     aggregated.push(...chunkResults)
   }

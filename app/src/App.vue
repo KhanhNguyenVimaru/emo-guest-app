@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import Chart from 'chart.js/auto'
 import type { ChartData } from 'chart.js'
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { read, utils } from 'xlsx'
 import {
   classifyEmotion,
   classifyEmotionBatch,
   type ClassifyEmotionResult,
   MAX_BATCH_SIZE,
+  chunkIntoBlocks,
 } from '../gemini'
 
 type Mode = 'single' | 'excel'
@@ -43,6 +44,7 @@ const excelNotice = ref<string | null>(null)
 const predictions = ref<ClassifyEmotionResult[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
+const showTutorial = ref(false)
 
 const chartCanvas = ref<HTMLCanvasElement | null>(null)
 let chartInstance: Chart<'pie'> | null = null
@@ -65,6 +67,26 @@ const latestSingleResult = computed(() =>
 )
 const highlightedEmotion = computed(() => latestSingleResult.value?.predictedEmotion ?? null)
 const highlightedSentence = computed(() => latestSingleResult.value?.sentence ?? null)
+const excelBlocks = computed(() =>
+  chunkIntoBlocks(excelSentences.value, EXCEL_BATCH_SIZE).map((block, blockIndex) => ({
+    blockId: blockIndex + 1,
+    sentences: block.map((text, localIndex) => ({
+      localId: localIndex + 1,
+      text,
+      globalNumber: blockIndex * EXCEL_BATCH_SIZE + localIndex + 1,
+    })),
+  })),
+)
+const predictionBlocks = computed(() =>
+  chunkIntoBlocks(predictions.value, EXCEL_BATCH_SIZE).map((block, blockIndex) => ({
+    blockId: blockIndex + 1,
+    results: block.map((result, localIndex) => ({
+      localId: localIndex + 1,
+      globalNumber: blockIndex * EXCEL_BATCH_SIZE + localIndex + 1,
+      result,
+    })),
+  })),
+)
 
 const emotionCounts = computed(() => {
   const counts: Record<ChartLabel, number> = {
@@ -108,6 +130,33 @@ const statusMessage = computed(() => {
   }
   return 'Analyzing sentence...'
 })
+
+const tutorialSections = [
+  {
+    title: 'Single sentence mode',
+    steps: [
+      'Enter your Gemini API key to unlock the analyze buttons.',
+      'Type or paste one sentence into the text area.',
+      'Choose "Analyze this sentence" to see the predicted emotion on the right.',
+    ],
+  },
+  {
+    title: 'Excel upload mode',
+    steps: [
+      'Switch to Excel Upload in the sidebar.',
+      `Upload a .xlsx or .xls file with up to ${MAX_EXCEL_SENTENCES} non-empty cells.`,
+      'Press "Analyze selected sentences" to populate the chart and list below.',
+    ],
+  },
+  {
+    title: 'Tips',
+    steps: [
+      'Only non-empty cells are included and trimmed automatically.',
+      'Results stay local to your browser session.',
+      'Switching modes clears existing outputs so you can start clean.',
+    ],
+  },
+] as const
 
 const teardownChart = () => {
   if (chartInstance) {
@@ -191,10 +240,6 @@ watch(apiKey, () => {
   if (currentError && currentError.toLowerCase().includes('api key')) {
     error.value = null
   }
-})
-
-onUnmounted(() => {
-  teardownChart()
 })
 
 const requireApiKey = (): string | null => {
@@ -307,6 +352,29 @@ const handleExcelUpload = async (event: Event) => {
     error.value = err instanceof Error ? err.message : 'Unable to read the Excel file.'
   }
 }
+
+const closeTutorial = () => {
+  showTutorial.value = false
+}
+
+const openTutorial = () => {
+  showTutorial.value = true
+}
+
+const handleEscapeKey = (event: KeyboardEvent) => {
+  if (event.key === 'Escape') {
+    closeTutorial()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handleEscapeKey)
+})
+
+onUnmounted(() => {
+  teardownChart()
+  window.removeEventListener('keydown', handleEscapeKey)
+})
 </script>
 
 <template>
@@ -351,9 +419,17 @@ const handleExcelUpload = async (event: Event) => {
               {{ activeMode === 'single' ? 'Analyze a single sentence' : 'Analyze sentences from Excel' }}
             </h2>
           </div>
-          <div class="text-sm text-slate-500">
+          <div class="flex items-center justify-end gap-3 text-sm text-slate-500">
             <span v-if="statusMessage">{{ statusMessage }}</span>
             <span v-else>Gemini 2.5 Flash · Live pie chart</span>
+            <button
+              type="button"
+              class="inline-flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-base font-semibold text-slate-600 transition hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-200"
+              aria-label="Open tutorial"
+              @click="openTutorial"
+            >
+              i
+            </button>
           </div>
         </div>
       </header>
@@ -455,18 +531,33 @@ const handleExcelUpload = async (event: Event) => {
                     <p v-if="excelNotice" class="text-xs text-amber-600">{{ excelNotice }}</p>
                   </div>
 
-                  <div v-if="excelSentences.length" class="space-y-2 text-sm">
-                    <p class="font-semibold text-slate-700">Sentences queued for analysis:</p>
-                    <ol class="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-slate-600">
-                      <li
-                        v-for="(row, index) in excelSentences"
-                        :key="`${row}-${index}`"
-                        class="flex gap-3"
+                  <div v-if="excelBlocks.length" class="space-y-3 text-sm">
+                    <div class="flex items-center justify-between">
+                      <p class="font-semibold text-slate-700">Blocks queued for analysis:</p>
+                      <span class="text-xs text-slate-500">Each block holds up to {{ EXCEL_BATCH_SIZE }} sentences</span>
+                    </div>
+                    <div class="space-y-2">
+                      <article
+                        v-for="block in excelBlocks"
+                        :key="`block-${block.blockId}`"
+                        class="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
                       >
-                        <span class="text-slate-400">{{ index + 1 }}.</span>
-                        <span class="text-slate-900">{{ row }}</span>
-                      </li>
-                    </ol>
+                        <div class="flex items-center justify-between text-xs uppercase tracking-[0.2em] text-slate-500">
+                          <span>Block {{ block.blockId }}</span>
+                          <span>{{ block.sentences.length }}/{{ EXCEL_BATCH_SIZE }} sentences</span>
+                        </div>
+                        <ol class="mt-2 space-y-2 text-slate-600">
+                          <li
+                            v-for="sentence in block.sentences"
+                            :key="`block-${block.blockId}-${sentence.localId}`"
+                            class="flex gap-3"
+                          >
+                            <span class="text-slate-400">{{ block.blockId }}.{{ sentence.localId }}</span>
+                            <span class="text-slate-900">{{ sentence.text }}</span>
+                          </li>
+                        </ol>
+                      </article>
+                    </div>
                   </div>
 
                   <button
@@ -547,25 +638,39 @@ const handleExcelUpload = async (event: Event) => {
               <span class="text-sm text-slate-500">{{ hasResults ? 'Complete' : 'Waiting for input' }}</span>
             </div>
 
-            <div class="mt-4 space-y-3" v-if="hasResults">
+            <div class="mt-4 space-y-4" v-if="hasResults">
               <article
-                v-for="(item, index) in predictions"
-                :key="`${item.sentence}-${index}`"
+                v-for="block in predictionBlocks"
+                :key="`prediction-block-${block.blockId}`"
                 class="rounded-2xl border border-slate-200 bg-slate-50 p-4"
               >
                 <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
-                  <p class="font-semibold text-slate-900">Sentence {{ index + 1 }}</p>
-                  <span
-                    class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide"
-                    :style="{
-                      backgroundColor: `${resolveColor(item.predictedEmotion)}20`,
-                      color: resolveColor(item.predictedEmotion),
-                    }"
-                  >
-                    {{ (item.predictedEmotion ?? 'unknown').toUpperCase() }}
-                  </span>
+                  <p class="font-semibold text-slate-900">Block {{ block.blockId }}</p>
+                  <span class="text-xs text-slate-500">{{ block.results.length }}/{{ EXCEL_BATCH_SIZE }} sentences</span>
                 </div>
-                <p class="mt-2 text-sm text-slate-600">{{ item.sentence }}</p>
+                <div class="mt-3 space-y-3">
+                  <div
+                    v-for="entry in block.results"
+                    :key="`prediction-${block.blockId}-${entry.localId}`"
+                    class="rounded-2xl border border-slate-200 bg-white px-4 py-3"
+                  >
+                    <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
+                      <p class="font-semibold text-slate-900">
+                        Block {{ block.blockId }} · Sentence {{ entry.localId }} (#{{ entry.globalNumber }})
+                      </p>
+                      <span
+                        class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide"
+                        :style="{
+                          backgroundColor: `${resolveColor(entry.result.predictedEmotion)}20`,
+                          color: resolveColor(entry.result.predictedEmotion),
+                        }"
+                      >
+                        {{ (entry.result.predictedEmotion ?? 'unknown').toUpperCase() }}
+                      </span>
+                    </div>
+                    <p class="mt-2 text-sm text-slate-600">{{ entry.result.sentence }}</p>
+                  </div>
+                </div>
               </article>
             </div>
             <p v-else class="text-sm text-slate-500">Run an analysis and every sentence will appear here with its label.</p>
@@ -573,5 +678,54 @@ const handleExcelUpload = async (event: Event) => {
         </div>
       </section>
     </main>
+
+    <teleport to="body">
+      <div
+        v-if="showTutorial"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-4 py-8"
+        @click.self="closeTutorial"
+      >
+        <div class="w-full max-w-3xl rounded-3xl bg-white p-6 shadow-2xl">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <p class="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">Tutorial</p>
+              <h3 class="mt-1 text-2xl font-bold text-slate-900">Getting started with EmoGuest</h3>
+              <p class="mt-2 text-sm text-slate-500">
+                Follow these quick steps whenever you need a refresher on how to use the analyzer.
+              </p>
+            </div>
+            <button
+              type="button"
+              class="inline-flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 text-sm font-semibold text-slate-500 transition hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-200"
+              aria-label="Close tutorial"
+              @click="closeTutorial"
+            >
+              &times;
+            </button>
+          </div>
+          <div class="mt-6 grid gap-6 md:grid-cols-2">
+            <article
+              v-for="section in tutorialSections"
+              :key="section.title"
+              class="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+            >
+              <h4 class="text-base font-semibold text-slate-900">{{ section.title }}</h4>
+              <ul class="mt-3 space-y-2 text-sm text-slate-600">
+                <li v-for="step in section.steps" :key="step">{{ step }}</li>
+              </ul>
+            </article>
+          </div>
+          <div class="mt-6 text-right">
+            <button
+              type="button"
+              class="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+              @click="closeTutorial"
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      </div>
+    </teleport>
   </div>
 </template>

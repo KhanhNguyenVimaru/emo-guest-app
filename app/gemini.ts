@@ -3,6 +3,11 @@ import { GoogleGenerativeAI, type GenerativeModel } from '@google/generative-ai'
 const MODEL_NAME = 'gemini-2.5-flash'
 const LABELS = ['sadness', 'joy', 'love', 'anger', 'fear', 'surprise'] as const
 export const MAX_BATCH_SIZE = 4
+export const LANGUAGE_LABELS = {
+  english: 'English',
+  vietnamese: 'Vietnamese',
+} as const
+export type LanguageCode = keyof typeof LANGUAGE_LABELS
 const TOKENS_PER_SENTENCE = 256
 type EmotionLabel = (typeof LABELS)[number]
 
@@ -69,19 +74,29 @@ function ensureModel(apiKey: string): GenerativeModel {
   return cachedModel
 }
 
-function buildPrompt(sentence: string): string {
-  return [
+function buildPrompt(sentence: string, context: string | undefined, language: LanguageCode): string {
+  const trimmedContext = context?.trim()
+  const lines = [
     'Classify the emotion conveyed by the following sentence.',
     `Allowed labels: ${LABELS.join(', ')}.`,
+    `Language: ${LANGUAGE_LABELS[language]}. Only classify sentences written in the selected language.`,
     'Reply strictly in JSON format: {"label": "<label>"}',
-    `Sentence: ${sentence}`,
-  ].join('\n')
+  ]
+
+  if (trimmedContext) {
+    lines.push('Use the following additional context if it helps disambiguate the emotion:')
+    lines.push(trimmedContext)
+  }
+
+  lines.push(`Sentence: ${sentence}`)
+  return lines.join('\n')
 }
 
-function buildBatchPrompt(sentences: string[]): string {
+function buildBatchPrompt(sentences: string[], language: LanguageCode): string {
   return [
     'Classify the emotion conveyed by each sentence below.',
     `Allowed labels: ${LABELS.join(', ')}.`,
+    `Language: ${LANGUAGE_LABELS[language]}. Only classify sentences written in the selected language.`,
     'Reply strictly in JSON array format. Each element must look like {"sentence": "<original>", "label": "<label>"}.',
     'Preserve the original order and sentences exactly as provided.',
     'Sentences:',
@@ -156,14 +171,19 @@ function normalizeLabel(raw: string): EmotionLabel | null {
   return LABEL_SYNONYMS[candidate] ?? null
 }
 
-export async function classifyEmotion(sentence: string, apiKey: string): Promise<ClassifyEmotionResult> {
+export async function classifyEmotion(
+  sentence: string,
+  apiKey: string,
+  context?: string,
+  language: LanguageCode = 'english',
+): Promise<ClassifyEmotionResult> {
   const trimmed = sentence?.trim()
   if (!trimmed) {
     throw new Error('Sentence must not be empty.')
   }
 
   const model = ensureModel(apiKey)
-  const result = await model.generateContent(buildPrompt(trimmed))
+  const result = await model.generateContent(buildPrompt(trimmed, context?.trim(), language))
   const response = await result.response
 
   const finishReason = response.candidates?.[0]?.finishReason ?? null
@@ -190,9 +210,10 @@ export function chunkIntoBlocks<T>(items: T[], blockSize: number = MAX_BATCH_SIZ
 async function classifyBatchChunk(
   model: GenerativeModel,
   sentences: string[],
+  language: LanguageCode,
 ): Promise<ClassifyEmotionResult[]> {
 
-  const result = await model.generateContent(buildBatchPrompt(sentences))
+  const result = await model.generateContent(buildBatchPrompt(sentences, language))
   const response = await result.response
 
   const finishReason = response.candidates?.[0]?.finishReason ?? null
@@ -225,6 +246,7 @@ async function classifyBatchChunk(
 export async function classifyEmotionBatch(
   sentences: string[],
   apiKey: string,
+  language: LanguageCode = 'english',
 ): Promise<ClassifyEmotionResult[]> {
   const cleaned = sentences.map((s) => s.trim()).filter((s): s is string => Boolean(s))
   if (!cleaned.length) {
@@ -235,7 +257,7 @@ export async function classifyEmotionBatch(
   const aggregated: ClassifyEmotionResult[] = []
 
   for (const chunk of chunkIntoBlocks(cleaned, MAX_BATCH_SIZE)) {
-    const chunkResults = await classifyBatchChunk(model, chunk)
+    const chunkResults = await classifyBatchChunk(model, chunk, language)
     aggregated.push(...chunkResults)
   }
 

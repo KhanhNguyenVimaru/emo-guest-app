@@ -9,6 +9,8 @@ import {
   type ClassifyEmotionResult,
   MAX_BATCH_SIZE,
   chunkIntoBlocks,
+  LANGUAGE_LABELS,
+  type LanguageCode,
 } from '../gemini'
 
 type Mode = 'single' | 'excel'
@@ -35,9 +37,18 @@ const CHART_COLORS: Record<ChartLabel, string> = {
   unknown: '#94a3b8',
 }
 
+const LANGUAGE_OPTIONS = (Object.entries(LANGUAGE_LABELS) as [LanguageCode, string][]).map(
+  ([key, label]) => ({
+    key,
+    label,
+  }),
+)
+
 const apiKey = ref('')
 const activeMode = ref<Mode>('single')
 const sentence = ref('')
+const singleContext = ref('')
+const selectedLanguage = ref<LanguageCode>('english')
 const excelSentences = ref<string[]>([])
 const excelFileName = ref<string | null>(null)
 const excelNotice = ref<string | null>(null)
@@ -224,6 +235,7 @@ const resetStateForMode = (mode: Mode) => {
     excelNotice.value = null
   } else {
     sentence.value = ''
+    singleContext.value = ''
   }
 }
 
@@ -262,7 +274,13 @@ const classifySingle = async () => {
   predictions.value = []
 
   try {
-    const response = await classifyEmotion(sentence.value.trim(), key)
+    const contextPayload = singleContext.value.trim() || undefined
+    const response = await classifyEmotion(
+      sentence.value.trim(),
+      key,
+      contextPayload,
+      selectedLanguage.value,
+    )
     predictions.value = [response]
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Unable to analyze the sentence.'
@@ -282,7 +300,7 @@ const classifyExcel = async () => {
   predictions.value = []
 
   try {
-    const results = await classifyEmotionBatch(excelSentences.value, key)
+    const results = await classifyEmotionBatch(excelSentences.value, key, selectedLanguage.value)
     if (!results.length) {
       throw new Error('No valid sentences found in the file.')
     }
@@ -470,6 +488,24 @@ onUnmounted(() => {
                   </p>
                 </div>
 
+                <div class="space-y-2">
+                  <label class="text-sm font-semibold text-slate-700" for="language-select">Input language</label>
+                  <select
+                    id="language-select"
+                    v-model="selectedLanguage"
+                    class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 focus:border-sky-400 focus:outline-none focus:ring-4 focus:ring-sky-200"
+                  >
+                    <option
+                      v-for="option in LANGUAGE_OPTIONS"
+                      :key="option.key"
+                      :value="option.key"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <p class="text-xs text-slate-500">Gemini will expect sentences in the selected language.</p>
+                </div>
+
                 <form v-if="activeMode === 'single'" class="space-y-4" @submit.prevent="classifySingle">
                   <label class="text-sm font-semibold text-slate-700" for="sentence-input">Sentence</label>
                   <textarea
@@ -477,6 +513,14 @@ onUnmounted(() => {
                     v-model="sentence"
                     rows="5"
                     placeholder="Example: I feel incredibly happy about finishing this project."
+                    class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none focus:ring-4 focus:ring-sky-200"
+                  ></textarea>
+                  <label class="text-sm font-semibold text-slate-700" for="context-input">Context (optional)</label>
+                  <textarea
+                    id="context-input"
+                    v-model="singleContext"
+                    rows="3"
+                    placeholder="Add background or scenario details that help interpret the sentence."
                     class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none focus:ring-4 focus:ring-sky-200"
                   ></textarea>
 
